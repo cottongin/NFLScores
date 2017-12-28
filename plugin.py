@@ -46,10 +46,10 @@ class NFLScores(callbacks.Plugin):
         self.__parent = super(NFLScores, self)
         self.__parent.__init__(irc)
 
-        #self._SCOREBOARD_ENDPOINT = ('http://www.nfl.com/liveupdate'
-        #                             '/scorestrip/ss.xml')
         self._SCOREBOARD_ENDPOINT = ('http://www.nfl.com/liveupdate'
-                                     '/scorestrip/postseason/ss.xml')
+                                     '/scorestrip/ss.xml')
+        #self._SCOREBOARD_ENDPOINT = ('http://www.nfl.com/liveupdate'
+        #                             '/scorestrip/postseason/ss.xml')
         self._GAME_URL = ('http://www.nfl.com/liveupdate'
                           '/game-center/{}/{}_gtd.json')
 
@@ -73,7 +73,7 @@ class NFLScores(callbacks.Plugin):
         """
 
         if optional_team is None:
-            team = "--IP"
+            team = "ALL"
             irc.reply(self._getTodayGames(team))
         elif optional_team == '*':
             nf = self._getTodayGames('NOTFINAL')
@@ -89,9 +89,23 @@ class NFLScores(callbacks.Plugin):
 
     nfl = wrap(nfl, [optional('somethingWithoutSpaces')])
 
+    def nflgamestats(self, irc, msg, args, team): # optional_team, optional_date):
+        """<team>
+        Get current game stats for the given team.
+        """
+
+        team = team.upper()
+        irc.reply(self._getTodayGamesStats(team))
+
+    nflgamestats = wrap(nflgamestats, [('somethingWithoutSpaces')])
+
     def _getTodayGames(self, team):
         games = self._getGames(team, self._getTodayDate())
         return self._resultAsString(games, team)
+
+    def _getTodayGamesStats(self, team):
+        games = self._getGameStats(team, self._getTodayDate())
+        return self._statsAsString(games, team)
 
     def _getGamesForDate(self, team, date):
         games = self._getGames(team, date)
@@ -111,8 +125,26 @@ class NFLScores(callbacks.Plugin):
         use_cache = (date == self._getTodayDate())
         response = self._getURL(sched_url, use_cache)
         games = self._getGamesSch(response, team)
+        print(games)
         games = self._getGamesJson(base_games_url, games, use_cache)
         games = self._parseGames(games, team)
+
+        return games
+
+    def _getGameStats(self, team, date):
+        """Given a date, populate the url with it and try to download its
+        content. If successful, parse the JSON data and extract the relevant
+        fields for each game. Returns a list of games."""
+        sched_url = self._SCOREBOARD_ENDPOINT
+        base_games_url = self._GAME_URL
+
+        # (If asking for today's results, enable the 'If-Mod.-Since' flag)
+        use_cache = (date == self._getTodayDate())
+        response = self._getURL(sched_url, use_cache)
+        games = self._getGamesSch(response, team)
+        #print(games)
+        games = self._getGamesJson(base_games_url, games, use_cache)
+        games = self._parseStats(games, team)
 
         return games
 
@@ -247,8 +279,9 @@ class NFLScores(callbacks.Plugin):
 
         for game in games:
             h = int(game['time'].split(':')[0])
+            print(h)
             m = int(game['time'].split(':')[1])
-            if 0 < h <= 8:  # All games before "9:00" are PM until proven otherwise
+            if 0 < h <= 12:  # All games before "9:00" are PM until proven otherwise
                 game['meridiem'] = 'PM'
 
             if game['meridiem'] is None:
@@ -258,6 +291,8 @@ class NFLScores(callbacks.Plugin):
                 proceeding = [g for g in days_games if g['eid'] > game['eid']]
 
                 #print(days_games, preceeding, proceeding)
+                # for g in proceeding:
+                #     print(g)
 
                 # If any games *after* this one are AM then so is this
                 if any(g['meridiem'] == 'AM' for g in proceeding):
@@ -327,7 +362,8 @@ class NFLScores(callbacks.Plugin):
 
             # Starting times are in UTC. By default, we will show Eastern times.
             # (In the future we could add a user option to select timezones.)
-            starting_time = '{} {}{}'.format(g['wday'], g['time'], g['meridiem'])
+            # starting_time = '{} {}{}'.format(g['wday'], g['time'], g['meridiem'])
+            starting_time = '{} {}'.format(g['wday'], g['time'])
             if not g['json']:
                 game_info = {'home_team': g['home'],
                              'away_team': g['away'],
@@ -384,6 +420,96 @@ class NFLScores(callbacks.Plugin):
 
         return games
 
+    def _parseStats(self, data, team):
+        """Extract all relevant fields from NFL.com's scoreboard.json
+        and return a list of games."""
+        games = []
+        for g in data:
+            #print(g['home'], g['away'], team)
+            # Starting times are in UTC. By default, we will show Eastern times.
+            # (In the future we could add a user option to select timezones.)
+            # starting_time = '{} {}{}'.format(g['wday'], g['time'], g['meridiem'])
+            starting_time = '{} {}'.format(g['wday'], g['time'])
+            if not g['json']:
+                game_info = {'home_team': g['home'],
+                             'away_team': g['away'],
+                             'starting_time': starting_time,
+                             'starting_time_TBD': False,
+                             'clock': None,
+                             'period': 0,
+                             'ended': False,
+                             'week': ('Week ' + g['week'] + ': ' if g['week'] else ''),
+                             'date': g['day'],
+                            }
+            else:
+                if team in g['home'] and len(team) == len(g['home']):
+                    game_info = {'home_team': g['home'],
+                                'away_team': g['away'],
+                                'home_score': g['json']['home']['score']['T'],
+                                'away_score': g['json']['away']['score']['T'],
+                                'starting_time': starting_time,
+                                'starting_time_TBD': False,
+                                'clock': g['json']['clock'],
+                                'redzone': g['json']['redzone'],
+                                'posteam': g['json']['posteam'],
+                                'period': g['json']['qtr'],
+                                'ended': (g['json']['qtr'] == 'Final' or g['json']['qtr'] == 'final overtime'),
+                                'week': ('Week ' + g['week'] + ': ' if g['week'] else ''),
+                                'date': g['day'],
+                                'firstdowns': g['json']['home']['stats']['team']['totfd'],
+                                'yards': g['json']['home']['stats']['team']['totyds'],
+                                'pyards': g['json']['home']['stats']['team']['pyds'],
+                                'ryards': g['json']['home']['stats']['team']['ryds'],
+                                'flags': g['json']['home']['stats']['team']['pen'],
+                                'flagyds': g['json']['home']['stats']['team']['penyds'],
+                                'trnovrs': g['json']['home']['stats']['team']['trnovr'],
+                                'punts': g['json']['home']['stats']['team']['pt'],
+                                'puntyds': g['json']['home']['stats']['team']['ptyds'],
+                                'puntavg': g['json']['home']['stats']['team']['ptavg'],
+                                'top': g['json']['home']['stats']['team']['top'],
+                                }
+                elif team in g['away'] and len(team) == len(g['away']):
+                    game_info = {'home_team': g['home'],
+                                'away_team': g['away'],
+                                'home_score': g['json']['home']['score']['T'],
+                                'away_score': g['json']['away']['score']['T'],
+                                'starting_time': starting_time,
+                                'starting_time_TBD': False,
+                                'clock': g['json']['clock'],
+                                'redzone': g['json']['redzone'],
+                                'posteam': g['json']['posteam'],
+                                'period': g['json']['qtr'],
+                                'ended': (g['json']['qtr'] == 'Final' or g['json']['qtr'] == 'final overtime'),
+                                'week': ('Week ' + g['week'] + ': ' if g['week'] else ''),
+                                'date': g['day'],
+                                'firstdowns': g['json']['away']['stats']['team']['totfd'],
+                                'yards': g['json']['away']['stats']['team']['totyds'],
+                                'pyards': g['json']['away']['stats']['team']['pyds'],
+                                'ryards': g['json']['away']['stats']['team']['ryds'],
+                                'flags': g['json']['away']['stats']['team']['pen'],
+                                'flagyds': g['json']['away']['stats']['team']['penyds'],
+                                'trnovrs': g['json']['away']['stats']['team']['trnovr'],
+                                'punts': g['json']['away']['stats']['team']['pt'],
+                                'puntyds': g['json']['away']['stats']['team']['ptyds'],
+                                'puntavg': g['json']['away']['stats']['team']['ptavg'],
+                                'top': g['json']['away']['stats']['team']['top'],
+                                }
+                else:
+                    pass
+            if team == "--IP":
+                if game_info['clock'] and not game_info['ended'] and game_info['period'] != 'Pregame':
+                    games.append(game_info)
+            elif team == "NOTFINAL":
+                if not game_info['ended']:
+                    games.append(game_info)
+            elif team == 'FINAL':
+                if game_info['ended']:
+                    games.append(game_info)
+            else:
+                games.append(game_info)
+
+        return games
+
 ############################
 # Today's games cache
 ############################
@@ -405,6 +531,79 @@ class NFLScores(callbacks.Plugin):
 ############################
 # Formatting helpers
 ############################
+    def _statsAsString(self, games, team=None):
+        if len(games) == 0:
+            return "No games found"
+        else:
+            s = sorted(games, key=lambda k: k['ended']) #, reverse=True)
+            b = []
+            for g in s:
+                b.append(self._statToString(g, team))
+            return "{} {}".format(ircutils.bold(ircutils.mircColor(team + ' Game Stats:', 'red')), ' | '.join(b))
+
+    def _statToString(self, game, team=None):
+        """ Given a game, format the information into a string according to the
+        context. For example:
+        "MEM @ CLE 07:00 PM ET" (a game that has not started yet),
+        "HOU 132 GSW 127 F OT2" (a game that ended and went to 2 overtimes),
+        "POR 36 LAC 42 8:01 Q2" (a game in progress)."""
+        away_team = game['away_team']
+        home_team = game['home_team']
+        if game['period'] == 'Final':
+            game['period'] = 4
+            game['ended'] = True
+        elif game ['period'] == 'Pregame':
+            game['period'] = 0
+        elif game['period'] == 'Halftime':
+            game['period'] = 9
+        elif game['period'] == 'final overtime':
+            game['period'] = 5
+            game['ended'] = True
+        else:
+            game['period'] = int(game['period'])
+        if game['period'] == 0: # The game hasn't started yet
+            starting_time = game['starting_time'] \
+                            if not game['starting_time_TBD'] \
+                            else "TBD"
+            return "{} @ {} {}".format(away_team, home_team, starting_time)
+
+        # The game started => It has points:
+        away_score = game['away_score']
+        home_score = game['home_score']
+
+        away_string = "{} {}".format(away_team, away_score)
+        home_string = "{} {}".format(home_team, home_score)
+
+        # Highlighting 'red zone' teams:
+        if game['redzone'] and not game['ended'] and game['period'] != 9:
+            if away_team in game['posteam']:
+                away_string = ircutils.mircColor(away_string, 'red')
+            if home_team in game['posteam']:
+                home_string = ircutils.mircColor(home_string, 'red')
+
+        # Bold for the winning team:
+        if int(away_score) > int(home_score):
+            away_string = ircutils.bold(away_string)
+        elif int(home_score) > int(away_score):
+            home_string = ircutils.bold(home_string)
+
+        game_string = "{} {} {}".format(away_string, home_string,
+                                        self._clockBoardToString(game['clock'],
+                                                                game['period'],
+                                                                game['ended']))
+        # Add stats
+        if team != "ALL" and team != '--IP' and game['period'] != 9: # and not game['ended'] and 'FINAL' not in team:
+            if len(team) <= 3:                 #  fd      ty       py      ry      flags           tos      punts          top
+                game_string = game_string + " :: {} {} | {} {} | {} {} | {} {} | {} {} ({} yds) | {} {} | {} {} ({} avg) | {} {}".format(ircutils.bold('First Downs:'), game['firstdowns'],
+                                                                                                                                           ircutils.bold('Total Yards:'), game['yards'],
+                                                                                                                                           ircutils.bold('Passing Yards:'), game['pyards'],
+                                                                                                                                           ircutils.bold('Rushing Yards:'), game['ryards'],
+                                                                                                                                           ircutils.bold('Flags:'), game['flags'], game['flagyds'],
+                                                                                                                                           ircutils.bold('Turnovers:'), game['trnovrs'],
+                                                                                                                                           ircutils.bold('Punts:'), game['punts'], game['puntavg'],
+                                                                                                                                           ircutils.bold('Time of Poss.:'), game['top'])
+        return game_string
+
     def _resultAsString(self, games, team=None):
         if len(games) == 0:
             return "No games found"
@@ -598,4 +797,4 @@ class NFLScores(callbacks.Plugin):
 
 Class = NFLScores
 
-# vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:
+# vim:set shiftwidth=4 softtabstop=4 expa
